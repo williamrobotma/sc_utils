@@ -31,8 +31,8 @@ def restore_X(adata):
         else:
             raise
 
-    if issparse(adata.X):
-        adata.X = adata.X.toarray()
+    # if issparse(adata.X):
+    #     adata.X = adata.X.toarray()
 
 
 def to_sparse(adata):
