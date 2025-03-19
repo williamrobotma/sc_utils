@@ -63,3 +63,10 @@ def to_dense(adata):
     for layer in adata.layers:
         if issparse(adata.layers[layer]):
             adata.layers[layer] = adata.layers[layer].toarray()
+
+
+def toarray_if_sparse(a):
+    if issparse(a):
+        return a.toarray()
+
+    return a
