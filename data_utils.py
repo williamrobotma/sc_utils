@@ -12,6 +12,10 @@ from scipy.sparse import csr_matrix, issparse
 
 _warn_skips = (os.path.dirname(__file__),)
 
+ENSEMBL_82_URL = (
+    "ftp://ftp.ensembl.org/pub/grch37/release-84/gtf/homo_sapiens/Homo_sapiens.GRCh37.82.gtf.gz"
+)
+
 
 def restore_X(adata):
     """Restore adata.X from a copy of adata.raw.X in-place.
