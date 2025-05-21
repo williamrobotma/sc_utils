@@ -13,7 +13,7 @@ from scipy.sparse import csr_matrix, issparse
 _warn_skips = (os.path.dirname(__file__),)
 
 ENSEMBL_82_URL = (
-    "ftp://ftp.ensembl.org/pub/grch37/release-84/gtf/homo_sapiens/Homo_sapiens.GRCh37.82.gtf.gz"
+    "ftp://ftp.ensembl.org/pub/grch37/release-84/gtf/homo_sapiens/" "Homo_sapiens.GRCh37.82.gtf.gz"
 )
 
 
@@ -25,7 +25,6 @@ def restore_X(adata):
 
     Args:
         adata (AnnData): Annotated data matrix.
-
     """
     try:
         adata.X = adata.raw.X.copy()
@@ -49,7 +48,6 @@ def to_sparse(adata):
 
     Args:
         adata (AnnData): Annotated data matrix.
-
     """
     if not issparse(adata.X):
         adata.X = csr_matrix(adata.X)
@@ -64,7 +62,6 @@ def to_dense(adata):
 
     Args:
         adata (AnnData): Annotated data matrix.
-
     """
     if issparse(adata.X):
         adata.X = adata.X.toarray()
@@ -91,7 +88,6 @@ def get_h5ad(dset_path, log1p=False):
 
     Returns:
         AnnData: Loaded AnnData object with X matrix set to reference layer.
-
     """
 
     adata = ad.read_h5ad(dset_path)
@@ -119,7 +115,6 @@ def safe_stratify(stratify):
 
     Returns:
         `stratify` if there is more than one unique value, else None.
-
     """
     if len(np.unique(stratify)) > 1:
         return stratify
@@ -183,7 +178,8 @@ def get_reference_genome_db(
             "Homo_sapiens.GRCh38.84.gtf".
         cache_fname (str, optional): Filename for the database cache. If None,
             will use the GTF filename with a .db extension. Defaults to None.
-        use_cache (bool): Whether to use an existing cache file. Defaults to True.
+        use_cache (bool): Whether to use an existing cache file. Defaults to
+            True.
 
     Returns:
         gffutils.FeatureDB: The database of genomic features.
@@ -234,11 +230,12 @@ def get_reference_genome_db(
 
 
 def populate_vars_from_ref(adata, db):
-    """Populates the var attribute of an AnnData object with information from a reference genome.
+    """Populates the var attribute of an AnnData object with information from a
+    reference genome.
 
     Args:
         adata (:obj: AnnData): AnnData object to populate.
-        db (gffutils.FeatureDB): Reference genome database.
+        db (:obj: gffutils.FeatureDB): Reference genome database.
 
     Returns:
         None: The input AnnData object is modified in-place.
@@ -257,3 +254,46 @@ def populate_vars_from_ref(adata, db):
         attrs = attrs.drop(columns=["gene_id"])
 
     adata.var = adata.var.join(attrs, how="left", validate="one_to_one")
+
+
+def drop_by_obs(adata, drop_obs):
+    """Drop observations from AnnData object based on values in obs dataframe.
+
+    Args:
+        adata (:obj: AnnData): AnnData object to filter.
+        drop_obs (dict): Dictionary where keys are column names in adata.obs and
+            values are lists of values to drop from those columns.
+
+    Returns:
+        AnnData: Filtered AnnData object with specified observations removed.
+    """
+    obs = adata.obs.copy()
+    obs_indexer = get_bool_mask_to_drop_rows_by_column_values(obs, drop_obs)
+
+    return adata[obs_indexer]
+
+
+def get_bool_mask_to_drop_rows_by_column_values(df, column_vals_dict):
+    """Creates a boolean mask to filter dataframe rows based on column values.
+
+    Args:
+        df (:obj: pandas.DataFrame): The dataframe to filter.
+        column_vals_dict (dict): Dictionary where keys are column names and
+            values are lists of values to exclude from those columns.
+
+    Returns:
+        pandas.Series: Boolean mask where True indicates rows to keep.
+    """
+    bool_indexer = pd.Series(data=True, index=df.index, dtype=bool)
+    for k, v in column_vals_dict.items():
+        if k not in df.columns:
+            warnings.warn(f"'{k}' not found in columns", UserWarning)
+            continue
+
+        for x in v:
+            if x in df[k].unique():
+                bool_indexer = bool_indexer & (df[k] != x)
+            else:
+                warnings.warn(f"'{x}' not found in '{k}'", UserWarning)
+
+    return bool_indexer
