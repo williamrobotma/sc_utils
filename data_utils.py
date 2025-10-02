@@ -78,13 +78,15 @@ def toarray_if_sparse(a):
     return a
 
 
-def get_h5ad(dset_path, log1p=False):
+def get_h5ad(dset_path, log1p=False, raw_counts=False):
     """Load AnnData from a .h5ad and sets X to the appropriate layer for log1p.
 
     Args:
         dset_path (str): Path to the h5ad file.
         log1p (bool, optional): If True, use 'loglsn_counts' layer as reference,
-            otherwise use 'lsn_counts'. Defaults to False.
+            otherwise use 'lsn_counts'. Ignored if `raw_counts=True`. Defaults
+            to False.
+        raw_counts (bool, optional): If True, use raw counts. Defaults to False.
 
     Returns:
         AnnData: Loaded AnnData object with X matrix set to reference layer.
@@ -95,6 +97,11 @@ def get_h5ad(dset_path, log1p=False):
     data_issparse = issparse(adata.X)
     x_layer = "loglsn_counts" if log1p else "lsn_counts"
 
+    if raw_counts:
+        if log1p:
+            warnings.warn("`log1p=True` is ignored when `raw_counts=True`", UserWarning)
+        x_layer = "raw_counts"
+
     try:
         if data_issparse:
             assert np.array_equal(adata.X.data, adata.layers[x_layer].data)
@@ -104,6 +111,7 @@ def get_h5ad(dset_path, log1p=False):
             assert np.array_equal(adata.X, adata.layers[x_layer])
     except AssertionError:
         adata.X = adata.layers[x_layer]
+
     return adata
 
 
