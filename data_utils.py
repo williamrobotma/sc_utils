@@ -100,7 +100,7 @@ def get_h5ad(dset_path, log1p=False, raw_counts=False):
     if raw_counts:
         if log1p:
             warnings.warn("`log1p=True` is ignored when `raw_counts=True`", UserWarning)
-        x_layer = "raw_counts"
+        x_layer = "counts"
 
     try:
         if data_issparse:
@@ -110,7 +110,7 @@ def get_h5ad(dset_path, log1p=False, raw_counts=False):
         else:
             assert np.array_equal(adata.X, adata.layers[x_layer])
     except AssertionError:
-        adata.X = adata.layers[x_layer]
+        adata.X = adata.layers[x_layer].copy()
 
     return adata
 
