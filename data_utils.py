@@ -8,6 +8,7 @@ import anndata as ad
 import gffutils
 import numpy as np
 import pandas as pd
+import scanpy as sc
 from scipy.sparse import csr_matrix, issparse
 
 _warn_skips = (os.path.dirname(__file__),)
@@ -78,15 +79,17 @@ def toarray_if_sparse(a):
     return a
 
 
-def get_h5ad(dset_path, log1p=False, raw_counts=False):
+def get_h5ad(dset_path, log1p=False, raw_counts=False, force_raw_log1p=False):
     """Load AnnData from a .h5ad and sets X to the appropriate layer for log1p.
 
     Args:
         dset_path (str): Path to the h5ad file.
         log1p (bool, optional): If True, use 'loglsn_counts' layer as reference,
-            otherwise use 'lsn_counts'. Ignored if `raw_counts=True`. Defaults
-            to False.
+            otherwise use 'lsn_counts'. Ignored if `raw_counts=True` unless
+            `force_raw_log1p=True`. Defaults to False.
         raw_counts (bool, optional): If True, use raw counts. Defaults to False.
+        force_raw_log1p (bool, optional): If True and `raw_counts=True`, use
+            log1p transform on raw counts. Defaults to False.
 
     Returns:
         AnnData: Loaded AnnData object with X matrix set to reference layer.
@@ -98,7 +101,7 @@ def get_h5ad(dset_path, log1p=False, raw_counts=False):
     x_layer = "loglsn_counts" if log1p else "lsn_counts"
 
     if raw_counts:
-        if log1p:
+        if log1p and not force_raw_log1p:
             warnings.warn("`log1p=True` is ignored when `raw_counts=True`", UserWarning)
         x_layer = "counts"
 
@@ -111,6 +114,9 @@ def get_h5ad(dset_path, log1p=False, raw_counts=False):
             assert np.array_equal(adata.X, adata.layers[x_layer])
     except AssertionError:
         adata.X = adata.layers[x_layer].copy()
+
+    if force_raw_log1p and raw_counts:
+        sc.pp.log1p(adata)
 
     return adata
 
