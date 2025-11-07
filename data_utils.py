@@ -115,7 +115,7 @@ def get_h5ad(dset_path, log1p=False, raw_counts=False, force_raw_log1p=False):
     except AssertionError:
         adata.X = adata.layers[x_layer].copy()
 
-    if force_raw_log1p and raw_counts:
+    if force_raw_log1p and log1p and raw_counts:
         sc.pp.log1p(adata)
 
     return adata
