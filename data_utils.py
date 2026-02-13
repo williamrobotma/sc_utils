@@ -16,6 +16,7 @@ _warn_skips = (os.path.dirname(__file__),)
 ENSEMBL_82_URL = (
     "ftp://ftp.ensembl.org/pub/grch37/release-84/gtf/homo_sapiens/" "Homo_sapiens.GRCh37.82.gtf.gz"
 )
+ENSEMBL_109_URL = "https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz"
 
 
 def restore_X(adata):
