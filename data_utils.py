@@ -3,6 +3,7 @@
 import os
 import subprocess
 import warnings
+from pathlib import Path
 
 import anndata as ad
 import gffutils
@@ -318,3 +319,29 @@ def get_bool_mask_to_drop_rows_by_column_values(df, column_vals_dict):
                 warnings.warn(f"'{x}' not found in '{k}'", UserWarning)
 
     return bool_indexer
+
+
+def save_adata_embeddings(
+    adata: ad.AnnData,
+    out_path: Path,
+    layer_name: str = None,
+):
+    """Saves embeddings from an AnnData object to a .npz file.
+
+    Args:
+        adata (ad.AnnData): The AnnData object containing the embeddings, where
+            adata.obs_names are the keys, while rows of adata.X or
+            adata.layers[layer_name] are the values to be saved.
+        out_path (Path): The path to save the .npz file to.
+        layer_name (str, optional): The name of the layer containing the
+            embeddings. If None, uses adata.X. Defaults to None.
+    """
+    embs_d = {}
+    layer = adata.layers[layer_name] if layer_name is not None else adata.X
+
+    for i in range(adata.n_obs):
+        embs_d[adata.obs_names[i]] = layer[i]
+
+    if not out_path.parent.exists():
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out_path, **embs_d)
