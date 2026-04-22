@@ -1,9 +1,11 @@
 """Utils for manipulating sc data."""
 
 import os
+import pickle
 import subprocess
 import warnings
 from pathlib import Path
+from typing import Literal, Optional, Sequence
 
 import anndata as ad
 import gffutils
@@ -79,6 +81,208 @@ def toarray_if_sparse(a):
         return a.toarray()
 
     return a
+
+
+HVGUMAPVariant = Literal["loglsn", "lograw"]
+
+
+def infer_hvg_umap_variant(
+    *,
+    raw_counts: bool,
+    log1p_raw_counts: Optional[bool] = None,
+) -> HVGUMAPVariant:
+    """Infer which saved HVG UMAP variant matches the data contract.
+
+    Current repository conventions support:
+    - ``loglsn``: UMAP fit on ``loglsn_counts``
+    - ``lograw``: UMAP fit on ``log1p(counts)``
+    """
+    if log1p_raw_counts is None:
+        log1p_raw_counts = raw_counts
+
+    return "lograw" if log1p_raw_counts else "loglsn"
+
+
+def get_hvg_umap_key(*, variant: HVGUMAPVariant) -> str:
+    """Return the canonical obsm key for the requested HVG UMAP variant."""
+    if variant == "lograw":
+        return "X_umap_HVGs_lograw"
+    if variant == "loglsn":
+        return "X_umap_HVGs"
+    raise ValueError(f"Unsupported HVG UMAP variant: {variant!r}.")
+
+
+def get_hvg_umap_model_path(
+    processed_dset_dir: Path | str,
+    *,
+    pc_only: bool,
+    variant: HVGUMAPVariant,
+) -> Path:
+    """Return the canonical saved UMAP model path for HVG inputs."""
+    processed_dset_dir = Path(processed_dset_dir)
+    if variant == "lograw":
+        filename = "umap_pconly_hvg_lograw.pkl" if pc_only else "umap_hvg_lograw.pkl"
+    elif variant == "loglsn":
+        filename = "umap_pconly_hvg.pkl" if pc_only else "umap_hvg.pkl"
+    else:
+        raise ValueError(f"Unsupported HVG UMAP variant: {variant!r}.")
+
+    return processed_dset_dir / filename
+
+
+def get_preencoded_dset_rel_path(
+    *,
+    model_name: str,
+    model_version: str,
+    torch_seed: int | str,
+) -> Path:
+    """Return the relative folder used by c-vae.py for embeddings output."""
+    return Path(model_name) / model_version / str(torch_seed)
+
+
+def build_preencoded_dset_path(
+    dset_path: Path | str,
+    *,
+    model_name: str,
+    model_version: str,
+    torch_seed: int | str,
+) -> Path:
+    """Translate a source dataset path into the c-vae embeddings path."""
+    dset_path = Path(dset_path)
+    return dset_path.parent / get_preencoded_dset_rel_path(
+        model_name=model_name,
+        model_version=model_version,
+        torch_seed=torch_seed,
+    ) / f"{dset_path.stem}_embeddings.zarr"
+
+
+def infer_non_preencoded_dset_path(
+    preencoded_dset_path: Path | str,
+    *,
+    model_name: str,
+    model_version: str,
+    torch_seed: int | str,
+) -> Path:
+    """Infer the source dataset path from a c-vae embeddings path.
+
+    c-vae.py writes embeddings to:
+    ``<dset parent>/<model_name>/<model_version>/<seed>/<dset stem>_embeddings.zarr``
+    so the original suffix must be recovered by checking sibling dataset files.
+    """
+    preencoded_dset_path = Path(preencoded_dset_path)
+    rel_path = get_preencoded_dset_rel_path(
+        model_name=model_name,
+        model_version=model_version,
+        torch_seed=torch_seed,
+    )
+
+    if preencoded_dset_path.suffix != ".zarr" or not preencoded_dset_path.stem.endswith(
+        "_embeddings"
+    ):
+        raise ValueError(f"Not a c-vae embeddings path: {preencoded_dset_path}")
+
+    if preencoded_dset_path.parent.parts[-len(rel_path.parts) :] != rel_path.parts:
+        raise ValueError(
+            f"Embeddings path does not match c-vae output layout for {rel_path}: {preencoded_dset_path}"
+        )
+
+    source_parent = preencoded_dset_path.parents[len(rel_path.parts)]
+    source_stem = preencoded_dset_path.stem.removesuffix("_embeddings")
+    candidates = [source_parent / f"{source_stem}.h5ad", source_parent / f"{source_stem}.zarr"]
+    existing = [candidate for candidate in candidates if candidate.exists()]
+
+    if len(existing) == 1:
+        return existing[0]
+    if len(existing) > 1:
+        raise ValueError(f"Ambiguous source dataset path for {preencoded_dset_path}: {existing}")
+
+    raise FileNotFoundError(
+        f"Could not infer source dataset for {preencoded_dset_path}. Tried: {candidates}"
+    )
+
+
+class HVGUMAPProjector:
+    """Small wrapper around the saved HVG UMAP model and its input contract."""
+
+    def __init__(
+        self,
+        *,
+        processed_dset_dir: Path | str,
+        pc_only: bool,
+        variant: HVGUMAPVariant,
+        hvg_mask=None,
+        input_logged: bool,
+    ) -> None:
+        self.processed_dset_dir = Path(processed_dset_dir)
+        self.pc_only = pc_only
+        self.variant = variant
+        self.hvg_mask = None if hvg_mask is None else np.asarray(hvg_mask, dtype=bool)
+        self.input_logged = input_logged
+
+        self.key = get_hvg_umap_key(variant=variant)
+        self.model_path = get_hvg_umap_model_path(
+            self.processed_dset_dir,
+            pc_only=self.pc_only,
+            variant=self.variant,
+        )
+        self._umapper = None
+
+    def load(self):
+        if self._umapper is None:
+            with open(self.model_path, "rb") as file:
+                self._umapper = pickle.load(file)
+        return self._umapper
+
+    def _prepare_matrix(self, X):
+        # Full-gene matrices need the HVG subset; HVG-only matrices pass through unchanged.
+        X = toarray_if_sparse(X)
+        if self.hvg_mask is not None and X.shape[1] == self.hvg_mask.shape[0]:
+            X = X[:, self.hvg_mask]
+        if not self.input_logged:
+            X = np.log1p(X)
+        return X
+
+    def _adata_matrix(self, adata: ad.AnnData):
+        if self.hvg_mask is not None and adata.n_vars == self.hvg_mask.shape[0]:
+            adata = adata[:, self.hvg_mask]
+
+        if self.variant == "lograw":
+            try:
+                return np.log1p(toarray_if_sparse(adata.layers["counts"]))
+            except KeyError:
+                return self._prepare_matrix(adata.X)
+
+        try:
+            return toarray_if_sparse(adata.layers["loglsn_counts"])
+        except KeyError:
+            return self._prepare_matrix(adata.X)
+
+    def transform(self, X):
+        return self.load().transform(self._prepare_matrix(X))
+
+    def transform_splits(
+        self,
+        X_d,
+        *,
+        source_split: str = "train",
+        source_index=None,
+        copy_splits: Sequence[str] = ("val", "test"),
+    ):
+        X_source = X_d[source_split]
+        if source_index is not None:
+            X_source = X_source[source_index]
+
+        transformed = self.transform(X_source)
+        out = {source_split: transformed}
+        for split in copy_splits:
+            out[split] = transformed
+        return out
+
+    def ensure_embedding(self, adata: ad.AnnData, *, source_adata: Optional[ad.AnnData] = None):
+        if self.key not in adata.obsm:
+            reference_adata = adata if source_adata is None else source_adata
+            adata.obsm[self.key] = self.load().transform(self._adata_matrix(reference_adata))
+        return adata.obsm[self.key]
 
 
 def get_h5ad(dset_path, log1p=False, raw_counts=False, force_raw_log1p=False):
