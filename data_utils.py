@@ -13,13 +13,16 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from scipy.sparse import csr_matrix, issparse
+from sklearn import model_selection
 
 _warn_skips = (os.path.dirname(__file__),)
 
 ENSEMBL_82_URL = (
-    "ftp://ftp.ensembl.org/pub/grch37/release-84/gtf/homo_sapiens/" "Homo_sapiens.GRCh37.82.gtf.gz"
+    "ftp://ftp.ensembl.org/pub/grch37/release-84/gtf/homo_sapiens/Homo_sapiens.GRCh37.82.gtf.gz"
 )
-ENSEMBL_109_URL = "https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz"
+ENSEMBL_109_URL = (
+    "https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz"
+)
 
 
 def restore_X(adata):
@@ -77,6 +80,7 @@ def to_dense(adata):
 
 
 def toarray_if_sparse(a):
+    """Return a dense NumPy array when ``a`` is sparse, else return ``a`` unchanged."""
     if issparse(a):
         return a.toarray()
 
@@ -149,11 +153,15 @@ def build_preencoded_dset_path(
 ) -> Path:
     """Translate a source dataset path into the c-vae embeddings path."""
     dset_path = Path(dset_path)
-    return dset_path.parent / get_preencoded_dset_rel_path(
-        model_name=model_name,
-        model_version=model_version,
-        torch_seed=torch_seed,
-    ) / f"{dset_path.stem}_embeddings.zarr"
+    return (
+        dset_path.parent
+        / get_preencoded_dset_rel_path(
+            model_name=model_name,
+            model_version=model_version,
+            torch_seed=torch_seed,
+        )
+        / f"{dset_path.stem}_embeddings.zarr"
+    )
 
 
 def infer_non_preencoded_dset_path(
@@ -183,7 +191,8 @@ def infer_non_preencoded_dset_path(
 
     if preencoded_dset_path.parent.parts[-len(rel_path.parts) :] != rel_path.parts:
         raise ValueError(
-            f"Embeddings path does not match c-vae output layout for {rel_path}: {preencoded_dset_path}"
+            "Embeddings path does not match c-vae output layout for "
+            f"{rel_path}: {preencoded_dset_path}"
         )
 
     source_parent = preencoded_dset_path.parents[len(rel_path.parts)]
@@ -228,6 +237,7 @@ class HVGUMAPProjector:
         self._umapper = None
 
     def load(self):
+        """Load the saved UMAP model on first use and return it."""
         if self._umapper is None:
             with open(self.model_path, "rb") as file:
                 self._umapper = pickle.load(file)
@@ -258,6 +268,7 @@ class HVGUMAPProjector:
             return self._prepare_matrix(adata.X)
 
     def transform(self, X):
+        """Project an expression matrix into the saved HVG UMAP space."""
         return self.load().transform(self._prepare_matrix(X))
 
     def transform_splits(
@@ -268,6 +279,11 @@ class HVGUMAPProjector:
         source_index=None,
         copy_splits: Sequence[str] = ("val", "test"),
     ):
+        """Project one split and reuse that projection for the requested sibling splits.
+
+        This preserves the repository's existing evaluation behavior, where one
+        transformed source matrix is reused for ``val`` and ``test`` placeholders.
+        """
         X_source = X_d[source_split]
         if source_index is not None:
             X_source = X_source[source_index]
@@ -279,6 +295,7 @@ class HVGUMAPProjector:
         return out
 
     def ensure_embedding(self, adata: ad.AnnData, *, source_adata: Optional[ad.AnnData] = None):
+        """Populate ``adata.obsm[self.key]`` if needed and return the embedding."""
         if self.key not in adata.obsm:
             reference_adata = adata if source_adata is None else source_adata
             adata.obsm[self.key] = self.load().transform(self._adata_matrix(reference_adata))
@@ -346,6 +363,44 @@ def safe_stratify(stratify):
         return stratify
 
     return None
+
+
+def sample_eval_train_indices(
+    adata: ad.AnnData,
+    *,
+    split_key: str,
+    split_on: str = "celltype",
+    seed: int = 2895,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample the train-set evaluation subsets used by VAE and diffusion plots.
+
+    This mirrors the repository's existing evaluation convention: draw two
+    disjoint train subsets, each with the same size as the validation split and
+    stratified by ``split_on``.
+    """
+    rng = np.random.default_rng(seed=seed)
+    train_mask = adata.obs[split_key] == "train"
+    val_size = int((adata.obs[split_key] == "val").sum())
+    train_labels = adata.obs.loc[train_mask, split_on]
+
+    remainder, selected_samples = model_selection.train_test_split(
+        train_labels,
+        test_size=val_size,
+        random_state=rng.integers(2**32),
+        stratify=train_labels,
+    )
+
+    _, reselected_samples = model_selection.train_test_split(
+        remainder,
+        test_size=val_size,
+        random_state=rng.integers(2**32),
+        stratify=remainder,
+    )
+
+    train_index = adata.obs.index[train_mask]
+    selected = train_index.get_indexer(selected_samples.index)
+    reselected = train_index.get_indexer(reselected_samples.index)
+    return selected, reselected
 
 
 def download_gtf(dir, url):
