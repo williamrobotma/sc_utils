@@ -1,5 +1,6 @@
 """Utils for manipulating sc data."""
 
+import logging
 import os
 import pickle
 import subprocess
@@ -15,14 +16,11 @@ import scanpy as sc
 from scipy.sparse import csr_matrix, issparse
 from sklearn import model_selection
 
+logger = logging.getLogger(__name__)
 _warn_skips = (os.path.dirname(__file__),)
 
-ENSEMBL_82_URL = (
-    "ftp://ftp.ensembl.org/pub/grch37/release-84/gtf/homo_sapiens/Homo_sapiens.GRCh37.82.gtf.gz"
-)
-ENSEMBL_109_URL = (
-    "https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz"
-)
+ENSEMBL_82_URL = "ftp://ftp.ensembl.org/pub/grch37/release-84/gtf/homo_sapiens/Homo_sapiens.GRCh37.82.gtf.gz"
+ENSEMBL_109_URL = "https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz"
 
 
 def restore_X(adata):
@@ -80,7 +78,7 @@ def to_dense(adata):
 
 
 def toarray_if_sparse(a):
-    """Return a dense NumPy array when ``a`` is sparse, else return ``a`` unchanged."""
+    """Return ``a.toarray()`` when ``a`` is sparse."""
     if issparse(a):
         return a.toarray()
 
@@ -95,11 +93,22 @@ def infer_hvg_umap_variant(
     raw_counts: bool,
     log1p_raw_counts: Optional[bool] = None,
 ) -> HVGUMAPVariant:
-    """Infer which saved HVG UMAP variant matches the data contract.
+    """Infer which saved HVG UMAP variant matches the current input contract.
 
-    Current repository conventions support:
-    - ``loglsn``: UMAP fit on ``loglsn_counts``
-    - ``lograw``: UMAP fit on ``log1p(counts)``
+    Args:
+        raw_counts: Whether the active data path starts from raw counts.
+        log1p_raw_counts: Optional override for whether raw counts are log1p
+            transformed before projection. When omitted, this follows
+            ``raw_counts`` for backward compatibility with the repository's
+            saved UMAP assets.
+
+    Returns:
+        HVGUMAPVariant: ``"lograw"`` when the projector should expect
+        ``log1p(counts)``, otherwise ``"loglsn"`` for ``loglsn_counts``.
+
+    Notes:
+        Current repository conventions support ``loglsn`` for UMAPs fit on
+        ``loglsn_counts`` and ``lograw`` for UMAPs fit on ``log1p(counts)``.
     """
     if log1p_raw_counts is None:
         log1p_raw_counts = raw_counts
@@ -107,29 +116,29 @@ def infer_hvg_umap_variant(
     return "lograw" if log1p_raw_counts else "loglsn"
 
 
-def get_hvg_umap_key(*, variant: HVGUMAPVariant) -> str:
-    """Return the canonical obsm key for the requested HVG UMAP variant."""
-    if variant == "lograw":
+def get_hvg_umap_key(*, hvg_umap_variant: HVGUMAPVariant) -> str:
+    """Return the saved ``obsm`` key for an HVG UMAP variant."""
+    if hvg_umap_variant == "lograw":
         return "X_umap_HVGs_lograw"
-    if variant == "loglsn":
+    if hvg_umap_variant == "loglsn":
         return "X_umap_HVGs"
-    raise ValueError(f"Unsupported HVG UMAP variant: {variant!r}.")
+    raise ValueError(f"Unsupported HVGUMAPVariant: {hvg_umap_variant!r}.")
 
 
 def get_hvg_umap_model_path(
     processed_dset_dir: Path | str,
     *,
     pc_only: bool,
-    variant: HVGUMAPVariant,
+    hvg_umap_variant: HVGUMAPVariant,
 ) -> Path:
-    """Return the canonical saved UMAP model path for HVG inputs."""
+    """Return the saved HVG UMAP pickle path."""
     processed_dset_dir = Path(processed_dset_dir)
-    if variant == "lograw":
+    if hvg_umap_variant == "lograw":
         filename = "umap_pconly_hvg_lograw.pkl" if pc_only else "umap_hvg_lograw.pkl"
-    elif variant == "loglsn":
+    elif hvg_umap_variant == "loglsn":
         filename = "umap_pconly_hvg.pkl" if pc_only else "umap_hvg.pkl"
     else:
-        raise ValueError(f"Unsupported HVG UMAP variant: {variant!r}.")
+        raise ValueError(f"Unsupported HVGUMAPVariant: {hvg_umap_variant!r}.")
 
     return processed_dset_dir / filename
 
@@ -140,7 +149,7 @@ def get_preencoded_dset_rel_path(
     model_version: str,
     torch_seed: int | str,
 ) -> Path:
-    """Return the relative folder used by c-vae.py for embeddings output."""
+    """Return the embeddings subdirectory used by ``c-vae.py``."""
     return Path(model_name) / model_version / str(torch_seed)
 
 
@@ -151,7 +160,7 @@ def build_preencoded_dset_path(
     model_version: str,
     torch_seed: int | str,
 ) -> Path:
-    """Translate a source dataset path into the c-vae embeddings path."""
+    """Return the embeddings path that ``c-vae.py`` writes for a dataset."""
     dset_path = Path(dset_path)
     return (
         dset_path.parent
@@ -171,14 +180,9 @@ def infer_non_preencoded_dset_path(
     model_version: str,
     torch_seed: int | str,
 ) -> Path:
-    """Infer the source dataset path from a c-vae embeddings path.
-
-    c-vae.py writes embeddings to:
-    ``<dset parent>/<model_name>/<model_version>/<seed>/<dset stem>_embeddings.zarr``
-    so the original suffix must be recovered by checking sibling dataset files.
-    """
+    """Recover the source dataset path from a ``*_embeddings.zarr`` path."""
     preencoded_dset_path = Path(preencoded_dset_path)
-    rel_path = get_preencoded_dset_rel_path(
+    expected_rel_path = get_preencoded_dset_rel_path(
         model_name=model_name,
         model_version=model_version,
         torch_seed=torch_seed,
@@ -189,21 +193,30 @@ def infer_non_preencoded_dset_path(
     ):
         raise ValueError(f"Not a c-vae embeddings path: {preencoded_dset_path}")
 
-    if preencoded_dset_path.parent.parts[-len(rel_path.parts) :] != rel_path.parts:
+    if (
+        preencoded_dset_path.parent.parts[-len(expected_rel_path.parts) :]
+        != expected_rel_path.parts
+    ):
         raise ValueError(
             "Embeddings path does not match c-vae output layout for "
-            f"{rel_path}: {preencoded_dset_path}"
+            f"{expected_rel_path}: {preencoded_dset_path}"
         )
 
-    source_parent = preencoded_dset_path.parents[len(rel_path.parts)]
-    source_stem = preencoded_dset_path.stem.removesuffix("_embeddings")
-    candidates = [source_parent / f"{source_stem}.h5ad", source_parent / f"{source_stem}.zarr"]
-    existing = [candidate for candidate in candidates if candidate.exists()]
+    dataset_parent = preencoded_dset_path.parents[len(expected_rel_path.parts)]
+    dataset_stem = preencoded_dset_path.stem.removesuffix("_embeddings")
+    candidates = [
+        dataset_parent / f"{dataset_stem}.h5ad",
+        dataset_parent / f"{dataset_stem}.zarr",
+    ]
+    existing_candidates = [candidate for candidate in candidates if candidate.exists()]
 
-    if len(existing) == 1:
-        return existing[0]
-    if len(existing) > 1:
-        raise ValueError(f"Ambiguous source dataset path for {preencoded_dset_path}: {existing}")
+    if len(existing_candidates) == 1:
+        return existing_candidates[0]
+    if len(existing_candidates) > 1:
+        raise ValueError(
+            "Ambiguous source dataset path for "
+            f"{preencoded_dset_path}: {existing_candidates}"
+        )
 
     raise FileNotFoundError(
         f"Could not infer source dataset for {preencoded_dset_path}. Tried: {candidates}"
@@ -211,34 +224,41 @@ def infer_non_preencoded_dset_path(
 
 
 class HVGUMAPProjector:
-    """Small wrapper around the saved HVG UMAP model and its input contract."""
+    """Load and apply a saved HVG UMAP projector."""
 
     def __init__(
         self,
         *,
         processed_dset_dir: Path | str,
         pc_only: bool,
-        variant: HVGUMAPVariant,
+        hvg_umap_variant: HVGUMAPVariant,
         hvg_mask=None,
-        input_logged: bool,
+        input_is_prelogged: bool,
+        transform_batch_size: Optional[int] = None,
     ) -> None:
         self.processed_dset_dir = Path(processed_dset_dir)
         self.pc_only = pc_only
-        self.variant = variant
+        self.hvg_umap_variant = hvg_umap_variant
         self.hvg_mask = None if hvg_mask is None else np.asarray(hvg_mask, dtype=bool)
-        self.input_logged = input_logged
+        self.input_is_prelogged = input_is_prelogged
+        if transform_batch_size is not None and transform_batch_size <= 0:
+            raise ValueError(
+                "transform_batch_size must be a positive integer when provided."
+            )
+        self.transform_batch_size = transform_batch_size
 
-        self.key = get_hvg_umap_key(variant=variant)
+        self.key = get_hvg_umap_key(hvg_umap_variant=self.hvg_umap_variant)
         self.model_path = get_hvg_umap_model_path(
             self.processed_dset_dir,
             pc_only=self.pc_only,
-            variant=self.variant,
+            hvg_umap_variant=self.hvg_umap_variant,
         )
         self._umapper = None
 
-    def load(self):
-        """Load the saved UMAP model on first use and return it."""
+    def get_umapper(self):
+        """Load and cache the saved UMAP model."""
         if self._umapper is None:
+            logger.debug("Loading HVG UMAP projector from %s", self.model_path)
             with open(self.model_path, "rb") as file:
                 self._umapper = pickle.load(file)
         return self._umapper
@@ -248,28 +268,95 @@ class HVGUMAPProjector:
         X = toarray_if_sparse(X)
         if self.hvg_mask is not None and X.shape[1] == self.hvg_mask.shape[0]:
             X = X[:, self.hvg_mask]
-        if not self.input_logged:
+        if not self.input_is_prelogged:
             X = np.log1p(X)
         return X
+
+    def _transform_in_chunks(self, X, *, batch_size: int) -> np.ndarray:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer when provided.")
+
+        umapper = self.get_umapper()
+        transformed_l = []
+        for start in range(0, X.shape[0], batch_size):
+            stop = min(start + batch_size, X.shape[0])
+            transformed_l.append(umapper.transform(self._prepare_matrix(X[start:stop])))
+
+        if not transformed_l:
+            return np.empty((0, umapper.embedding_.shape[1]))
+
+        return np.concatenate(transformed_l, axis=0)
 
     def _adata_matrix(self, adata: ad.AnnData):
         if self.hvg_mask is not None and adata.n_vars == self.hvg_mask.shape[0]:
             adata = adata[:, self.hvg_mask]
 
-        if self.variant == "lograw":
+        if self.hvg_umap_variant == "lograw":
             try:
                 return np.log1p(toarray_if_sparse(adata.layers["counts"]))
             except KeyError:
+                message = (
+                    f"{self.key}: `counts` layer missing; falling back to `adata.X` "
+                    "for lograw UMAP projection."
+                )
+                logger.warning(message)
+                warnings.warn(message, UserWarning, stacklevel=2)
                 return self._prepare_matrix(adata.X)
 
         try:
             return toarray_if_sparse(adata.layers["loglsn_counts"])
         except KeyError:
+            message = (
+                f"{self.key}: `loglsn_counts` layer missing; falling back to `adata.X` "
+                "for loglsn UMAP projection."
+            )
+            logger.warning(message)
+            warnings.warn(message, UserWarning, stacklevel=2)
             return self._prepare_matrix(adata.X)
 
-    def transform(self, X):
+    def transform(self, X, *, batch_size: Optional[int] = None):
         """Project an expression matrix into the saved HVG UMAP space."""
-        return self.load().transform(self._prepare_matrix(X))
+        if batch_size is None:
+            batch_size = self.transform_batch_size
+
+        if batch_size is None:
+            return self.get_umapper().transform(self._prepare_matrix(X))
+
+        if batch_size >= X.shape[0]:
+            return self.get_umapper().transform(self._prepare_matrix(X))
+
+        return self._transform_in_chunks(X, batch_size=batch_size)
+
+    def transform_adata(
+        self,
+        adata: ad.AnnData,
+        *,
+        batch_size: Optional[int] = None,
+    ) -> np.ndarray:
+        """Project an ``AnnData`` object into the saved HVG UMAP space."""
+        if batch_size is None:
+            batch_size = self.transform_batch_size
+
+        if batch_size is None:
+            return self.get_umapper().transform(self._adata_matrix(adata))
+
+        if batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer when provided.")
+        if batch_size >= adata.n_obs:
+            return self.get_umapper().transform(self._adata_matrix(adata))
+
+        transformed_l = []
+        umapper = self.get_umapper()
+        for start in range(0, adata.n_obs, batch_size):
+            stop = min(start + batch_size, adata.n_obs)
+            transformed_l.append(
+                umapper.transform(self._adata_matrix(adata[start:stop]))
+            )
+
+        if not transformed_l:
+            return np.empty((0, umapper.embedding_.shape[1]))
+
+        return np.concatenate(transformed_l, axis=0)
 
     def transform_splits(
         self,
@@ -279,10 +366,28 @@ class HVGUMAPProjector:
         source_index=None,
         copy_splits: Sequence[str] = ("val", "test"),
     ):
-        """Project one split and reuse that projection for the requested sibling splits.
+        """Project one split and reuse that projection for sibling split keys.
 
-        This preserves the repository's existing evaluation behavior, where one
-        transformed source matrix is reused for ``val`` and ``test`` placeholders.
+        Args:
+            X_d: Mapping from split name to expression matrix.
+            source_split: Split whose matrix is actually projected.
+            source_index: Optional row index applied before projection, used by
+                the evaluation scripts to reuse only the reselected train rows.
+            copy_splits: Additional split names that should receive the same
+                projected output object.
+
+        Returns:
+            dict: Mapping where ``source_split`` and every name in
+            ``copy_splits`` point at the projected source matrix.
+
+        Warnings:
+            This intentionally reuses the same transformed array for every split
+            in ``copy_splits``. Callers must not assume those outputs are
+            independently projected from their own source matrices.
+
+        Notes:
+            A debug log is emitted when reuse is applied so that this behavior
+            remains visible during evaluation debugging.
         """
         X_source = X_d[source_split]
         if source_index is not None:
@@ -290,15 +395,54 @@ class HVGUMAPProjector:
 
         transformed = self.transform(X_source)
         out = {source_split: transformed}
+        if copy_splits:
+            logger.debug(
+                "Reusing projected split '%s' for %s in HVGUMAPProjector",
+                source_split,
+                tuple(copy_splits),
+            )
         for split in copy_splits:
             out[split] = transformed
         return out
 
-    def ensure_embedding(self, adata: ad.AnnData, *, source_adata: Optional[ad.AnnData] = None):
-        """Populate ``adata.obsm[self.key]`` if needed and return the embedding."""
+    def populate_adata_if_not_present(
+        self, adata: ad.AnnData, *, source_adata: Optional[ad.AnnData] = None
+    ):
+        """Populate ``adata.obsm[self.key]`` if needed and return the embedding.
+
+        Args:
+            adata: Target `AnnData` whose ``obsm`` entry may be filled in place.
+            source_adata: Optional `AnnData` whose expression matrix should be
+                projected instead of ``adata`` when populating a missing
+                embedding. This is used when embeddings were generated from a
+                preencoded dataset but the visualization should follow the source
+                dataset's counts/log-count layers.
+
+        Returns:
+            np.ndarray: Embedding stored at ``adata.obsm[self.key]``.
+
+        Warnings:
+            Warns and logs when ``source_adata`` observation names do not match
+            ``adata.obs_names``, because the populated embedding may then be
+            misaligned with ``adata`` rows.
+
+        Notes:
+            This mutates ``adata.obsm`` only when the key is absent; otherwise
+            the existing embedding is returned unchanged.
+        """
         if self.key not in adata.obsm:
             reference_adata = adata if source_adata is None else source_adata
-            adata.obsm[self.key] = self.load().transform(self._adata_matrix(reference_adata))
+            if source_adata is not None and not adata.obs_names.equals(
+                source_adata.obs_names
+            ):
+                message = (
+                    f"{self.key}: source_adata.obs_names does not match adata.obs_names; "
+                    "populated embedding may be misaligned."
+                )
+                logger.warning(message)
+                warnings.warn(message, UserWarning, stacklevel=2)
+            logger.debug("Populating missing HVG UMAP embedding '%s'", self.key)
+            adata.obsm[self.key] = self.transform_adata(reference_adata)
         return adata.obsm[self.key]
 
 
@@ -377,6 +521,20 @@ def sample_eval_train_indices(
     This mirrors the repository's existing evaluation convention: draw two
     disjoint train subsets, each with the same size as the validation split and
     stratified by ``split_on``.
+
+    Args:
+        adata: AnnData object containing train and validation split labels.
+        split_key: Observation column identifying dataset splits.
+        split_on: Observation column used for stratified train sampling.
+        seed: Seed for the local NumPy random generator.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``(selected, reselected)`` train-row
+        indices relative to the train split only.
+
+    Notes:
+        Both returned index arrays are expressed in train-split coordinates, not
+        full-adata row coordinates.
     """
     rng = np.random.default_rng(seed=seed)
     train_mask = adata.obs[split_key] == "train"
