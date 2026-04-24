@@ -1,5 +1,6 @@
 """Utils for manipulating sc data."""
 
+import contextlib
 import logging
 import os
 import pickle
@@ -15,6 +16,7 @@ import pandas as pd
 import scanpy as sc
 from scipy.sparse import csr_matrix, issparse
 from sklearn import model_selection
+from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
 _warn_skips = (os.path.dirname(__file__),)
@@ -83,6 +85,25 @@ def toarray_if_sparse(a):
         return a.toarray()
 
     return a
+
+
+def _coerce_sparse_indices_to_int32(x):
+    """Return sparse matrix ``x`` with ``indices``/``indptr`` as ``int32``."""
+    if not issparse(x):
+        return x
+
+    indices = getattr(x, "indices", None)
+    indptr = getattr(x, "indptr", None)
+    if indices is None or indptr is None:
+        return x
+
+    if indices.dtype == np.int32 and indptr.dtype == np.int32:
+        return x
+
+    out = x.copy()
+    out.indices = indices.astype(np.int32, copy=False)
+    out.indptr = indptr.astype(np.int32, copy=False)
+    return out
 
 
 HVGUMAPVariant = Literal["loglsn", "lograw"]
@@ -261,6 +282,17 @@ class HVGUMAPProjector:
             logger.debug("Loading HVG UMAP projector from %s", self.model_path)
             with open(self.model_path, "rb") as file:
                 self._umapper = pickle.load(file)
+
+            search_index = getattr(self._umapper, "_knn_search_index", None)
+            if search_index is not None:
+                for attr in ("_search_graph", "_neighbor_graph"):
+                    graph = getattr(search_index, attr, None)
+                    if graph is not None:
+                        setattr(
+                            search_index,
+                            attr,
+                            _coerce_sparse_indices_to_int32(graph),
+                        )
         return self._umapper
 
     def _prepare_matrix(self, X):
@@ -278,9 +310,20 @@ class HVGUMAPProjector:
 
         umapper = self.get_umapper()
         transformed_l = []
-        for start in range(0, X.shape[0], batch_size):
-            stop = min(start + batch_size, X.shape[0])
-            transformed_l.append(umapper.transform(self._prepare_matrix(X[start:stop])))
+        total = X.shape[0]
+        # Use a single overall progress bar and suppress per-chunk stdout/stderr
+        # emitted by the underlying umapper.transform to keep logs concise.
+        with tqdm(total=total, desc="UMAP transform", unit="rows") as pbar:
+            for start in range(0, total, batch_size):
+                stop = min(start + batch_size, total)
+                with (
+                    open(os.devnull, "w") as devnull,
+                    contextlib.redirect_stdout(devnull),
+                    contextlib.redirect_stderr(devnull),
+                ):
+                    chunk_trans = umapper.transform(self._prepare_matrix(X[start:stop]))
+                transformed_l.append(chunk_trans)
+                pbar.update(stop - start)
 
         if not transformed_l:
             return np.empty((0, umapper.embedding_.shape[1]))
@@ -347,11 +390,20 @@ class HVGUMAPProjector:
 
         transformed_l = []
         umapper = self.get_umapper()
-        for start in range(0, adata.n_obs, batch_size):
-            stop = min(start + batch_size, adata.n_obs)
-            transformed_l.append(
-                umapper.transform(self._adata_matrix(adata[start:stop]))
-            )
+        total = adata.n_obs
+        with tqdm(total=total, desc="UMAP transform (adata)", unit="rows") as pbar:
+            for start in range(0, total, batch_size):
+                stop = min(start + batch_size, total)
+                with (
+                    open(os.devnull, "w") as devnull,
+                    contextlib.redirect_stdout(devnull),
+                    contextlib.redirect_stderr(devnull),
+                ):
+                    chunk_trans = umapper.transform(
+                        self._adata_matrix(adata[start:stop])
+                    )
+                transformed_l.append(chunk_trans)
+                pbar.update(stop - start)
 
         if not transformed_l:
             return np.empty((0, umapper.embedding_.shape[1]))
@@ -580,22 +632,18 @@ def download_gtf(dir, url):
     if not os.path.exists(gtf_path):
         if not os.path.exists(gtf_gz_path):
             print(f"Downloading {url} to {gtf_gz_path}")
-            subprocess.run(
-                [
-                    "curl",
-                    "--create-dirs",
-                    "-o",
-                    gtf_gz_path,
-                    url,
-                ]
-            )
-        print(f"Unzipping {gtf_gz_path}")
-        subprocess.run(
-            [
-                "gunzip",
+            subprocess.run([
+                "curl",
+                "--create-dirs",
+                "-o",
                 gtf_gz_path,
-            ]
-        )
+                url,
+            ])
+        print(f"Unzipping {gtf_gz_path}")
+        subprocess.run([
+            "gunzip",
+            gtf_gz_path,
+        ])
 
     return gtf_path
 
