@@ -561,47 +561,43 @@ def sample_eval_train_indices(
     return selected, reselected
 
 
-def download_gtf(dir, url):
+def download_gtf(out_dir, url) -> Path:
     """Downloads and extracts a GTF file from a URL.
 
     Args:
-        dir (str): Directory to download the file to.
+        out_dir (str): Directory to download the file to. Will be created if
+            it does not already exist.
         url (str): URL to download the GTF file from.
 
     Returns:
-        str: Path to the extracted GTF file.
+        pathlib.Path: Path to the extracted GTF file.
+
+    Raises:
+        subprocess.CalledProcessError: If the download or unzip command exits
+            with a non-zero status.
     """
-    os.makedirs(dir, exist_ok=True)
+    out_dir_path = Path(out_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
 
     gtf_gz = os.path.basename(url)
-    gtf_gz_path = os.path.join(dir, gtf_gz)
-    gtf_path = os.path.splitext(gtf_gz_path)[0]
+    gtf_gz_path = out_dir_path / gtf_gz
+    gtf_path = gtf_gz_path.with_suffix("")
 
-    if not os.path.exists(gtf_path):
-        if not os.path.exists(gtf_gz_path):
+    if not gtf_path.exists():
+        if not gtf_gz_path.exists():
             print(f"Downloading {url} to {gtf_gz_path}")
             subprocess.run(
-                [
-                    "curl",
-                    "--create-dirs",
-                    "-o",
-                    gtf_gz_path,
-                    url,
-                ]
+                ["curl", "--create-dirs", "-o", str(gtf_gz_path), url],
+                check=True,
             )
         print(f"Unzipping {gtf_gz_path}")
-        subprocess.run(
-            [
-                "gunzip",
-                gtf_gz_path,
-            ]
-        )
+        subprocess.run(["gunzip", str(gtf_gz_path)], check=True)
 
     return gtf_path
 
 
 def get_reference_genome_db(
-    dir,
+    out_dir,
     gtf_fname="Homo_sapiens.GRCh38.84.gtf",
     cache_fname=None,
     use_cache=True,
@@ -612,7 +608,8 @@ def get_reference_genome_db(
     https://www.biostars.org/p/152517/.
 
     Args:
-        dir (str): Directory containing the GTF file.
+        out_dir (str): Directory containing the GTF file (and where the
+            database cache will be created/loaded).
         gtf_fname (str): Filename of the GTF file. Defaults to
             "Homo_sapiens.GRCh38.84.gtf".
         cache_fname (str, optional): Filename for the database cache. If None,
@@ -620,14 +617,22 @@ def get_reference_genome_db(
         use_cache (bool): Whether to use an existing cache file. Defaults to
             True.
 
+    Raises:
+        FileNotFoundError: If the specified GTF file does not exist under
+            ``out_dir``.
+        Exception: Propagates exceptions raised by ``gffutils`` when creating
+            the database (these indicate problems parsing the GTF or writing
+            the cache).
+
     Returns:
         gffutils.FeatureDB: The database of genomic features.
     """
     if cache_fname is None:
         cache_fname = os.path.splitext(gtf_fname)[0] + ".db"
 
-    gtf_path = os.path.join(dir, gtf_fname)
-    cache_path = os.path.join(dir, cache_fname)
+    out_dir_path = Path(out_dir)
+    gtf_path = out_dir_path / gtf_fname
+    cache_path = out_dir_path / cache_fname
     id_spec = {
         "exon": "exon_id",
         "gene": "gene_id",
@@ -638,12 +643,12 @@ def get_reference_genome_db(
         # 'start_codon': [subfeature_handler],
         # 'UTR':  [subfeature_handler],
     }
-    if os.path.exists(cache_path) and use_cache:
-        db = gffutils.FeatureDB(cache_path)
+    if cache_path.exists() and use_cache:
+        db = gffutils.FeatureDB(str(cache_path))
     else:
         db = gffutils.create_db(
-            gtf_path,
-            cache_path,
+            str(gtf_path),
+            str(cache_path),
             # Since Ensembl GTF files now come with genes and transcripts already in
             # the file, we don't want to spend the time to infer them (which we would
             # need to do in an on-spec GTF file)
