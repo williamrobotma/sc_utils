@@ -7,7 +7,7 @@ import pickle
 import subprocess
 import warnings
 from pathlib import Path
-from typing import Literal, Optional, Sequence
+from typing import Literal, Optional
 
 import anndata as ad
 import gffutils
@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from scipy.sparse import csr_matrix, issparse
-from sklearn import model_selection
 from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
@@ -410,53 +409,6 @@ class HVGUMAPProjector:
 
         return np.concatenate(transformed_l, axis=0)
 
-    def transform_splits(
-        self,
-        X_d,
-        *,
-        source_split: str = "train",
-        source_index=None,
-        copy_splits: Sequence[str] = ("val", "test"),
-    ):
-        """Project one split and reuse that projection for sibling split keys.
-
-        Args:
-            X_d: Mapping from split name to expression matrix.
-            source_split: Split whose matrix is actually projected.
-            source_index: Optional row index applied before projection, used by
-                the evaluation scripts to reuse only the reselected train rows.
-            copy_splits: Additional split names that should receive the same
-                projected output object.
-
-        Returns:
-            dict: Mapping where ``source_split`` and every name in
-            ``copy_splits`` point at the projected source matrix.
-
-        Warnings:
-            This intentionally reuses the same transformed array for every split
-            in ``copy_splits``. Callers must not assume those outputs are
-            independently projected from their own source matrices.
-
-        Notes:
-            A debug log is emitted when reuse is applied so that this behavior
-            remains visible during evaluation debugging.
-        """
-        X_source = X_d[source_split]
-        if source_index is not None:
-            X_source = X_source[source_index]
-
-        transformed = self.transform(X_source)
-        out = {source_split: transformed}
-        if copy_splits:
-            logger.debug(
-                "Reusing projected split '%s' for %s in HVGUMAPProjector",
-                source_split,
-                tuple(copy_splits),
-            )
-        for split in copy_splits:
-            out[split] = transformed
-        return out
-
     def populate_adata_if_not_present(
         self, adata: ad.AnnData, *, source_adata: Optional[ad.AnnData] = None
     ):
@@ -544,73 +496,6 @@ def get_h5ad(dset_path, log1p=False, raw_counts=False, force_raw_log1p=False):
             )
 
     return adata
-
-
-def safe_stratify(stratify):
-    """Makes stratify arg for sklearn splits safe when there is only one class.
-
-    Args:
-        stratify (array-like): Array to stratify.
-
-    Returns:
-        `stratify` if there is more than one unique value, else None.
-    """
-    if len(np.unique(stratify)) > 1:
-        return stratify
-
-    return None
-
-
-def sample_eval_train_indices(
-    adata: ad.AnnData,
-    *,
-    split_key: str,
-    split_on: str = "celltype",
-    seed: int = 2895,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Sample the train-set evaluation subsets used by VAE and diffusion plots.
-
-    This mirrors the repository's existing evaluation convention: draw two
-    disjoint train subsets, each with the same size as the validation split and
-    stratified by ``split_on``.
-
-    Args:
-        adata: AnnData object containing train and validation split labels.
-        split_key: Observation column identifying dataset splits.
-        split_on: Observation column used for stratified train sampling.
-        seed: Seed for the local NumPy random generator.
-
-    Returns:
-        tuple[np.ndarray, np.ndarray]: ``(selected, reselected)`` train-row
-        indices relative to the train split only.
-
-    Notes:
-        Both returned index arrays are expressed in train-split coordinates, not
-        full-adata row coordinates.
-    """
-    rng = np.random.default_rng(seed=seed)
-    train_mask = adata.obs[split_key] == "train"
-    val_size = int((adata.obs[split_key] == "val").sum())
-    train_labels = adata.obs.loc[train_mask, split_on]
-
-    remainder, selected_samples = model_selection.train_test_split(
-        train_labels,
-        test_size=val_size,
-        random_state=rng.integers(2**32),
-        stratify=train_labels,
-    )
-
-    _, reselected_samples = model_selection.train_test_split(
-        remainder,
-        test_size=val_size,
-        random_state=rng.integers(2**32),
-        stratify=remainder,
-    )
-
-    train_index = adata.obs.index[train_mask]
-    selected = train_index.get_indexer(selected_samples.index)
-    reselected = train_index.get_indexer(reselected_samples.index)
-    return selected, reselected
 
 
 def download_gtf(out_dir, url) -> Path:
